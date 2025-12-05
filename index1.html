@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>3D 手势粒子系统 (iOS 修正版)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        
+        /* UI Container */
+        #ui-container {
+            position: absolute;
+            bottom: 30px;
+            /* 适配 iPhone 底部安全区域 */
+            bottom: max(30px, env(safe-area-inset-bottom) + 10px);
+            left: 50%;
+            transform: translateX(-50%);
+            width: 90%;
+            max-width: 600px;
+            background: rgba(40, 40, 40, 0.6);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-radius: 24px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            color: white;
+            z-index: 10;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        /* Controls Row */
+        .controls-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        /* Buttons */
+        .shape-btn {
+            background: rgba(255, 255, 255, 0.15);
+            border: none;
+            color: rgba(255, 255, 255, 0.9);
+            padding: 8px 14px;
+            border-radius: 16px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .shape-btn:active { transform: scale(0.95); }
+        .shape-btn.active {
+            background: #0a84ff; /* iOS Blue */
+            color: white;
+            box-shadow: 0 0 12px rgba(10, 132, 255, 0.4);
+        }
+
+        /* Color Picker */
+        .color-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(255,255,255,0.1);
+            padding: 4px 10px;
+            border-radius: 20px;
+        }
+        input[type="color"] {
+            border: none;
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            background: none;
+            padding: 0;
+        }
+
+        /* Loading & Status */
+        #status-bar {
+            position: absolute;
+            top: max(20px, env(safe-area-inset-top) + 10px);
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.8);
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(4px);
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            pointer-events: none;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            z-index: 20;
+        }
+        .dot {
+            width: 8px;
+            height: 8px;
+            background: #ff3b30;
+            border-radius: 50%;
+            transition: background 0.3s;
+        }
+
+        /* 关键：隐藏视频元素，但必须存在且有属性 */
+        .input_video { 
+            position: absolute; 
+            top: 0; left: 0; 
+            width: 1px; height: 1px; 
+            opacity: 0; 
+            pointer-events: none;
+        }
+
+        @media (max-width: 600px) {
+            .shape-btn { padding: 8px 10px; font-size: 12px; flex: 1; text-align: center; }
+            #ui-container { width: 92%; padding: 12px; }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="status-bar">
+        <div class="dot" id="status-dot"></div>
+        <span id="status-text">启动中... (请允许摄像头权限)</span>
+    </div>
+    
+    <div id="ui-container">
+        <div class="controls-row">
+            <div class="color-wrapper">
+                <span style="font-size:12px;">粒子色</span>
+                <input type="color" id="colorPicker" value="#0a84ff">
+            </div>
+            <button class="shape-btn" id="fs-btn" style="flex:0; padding: 6px 12px;">⛶</button>
+        </div>
+        <div class="controls-row" id="shape-buttons">
+            <button class="shape-btn active" data-shape="heart">❤️ 爱心</button>
+            <button class="shape-btn" data-shape="roger">Roger</button>
+            <button class="shape-btn" data-shape="saturn">🪐 土星</button>
+            <button class="shape-btn" data-shape="thumbsup">👍 点赞</button>
+        </div>
+    </div>
+
+    <video class="input_video" playsinline webkit-playsinline muted autoplay></video>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script>
+        // --- 检测是否为移动端 ---
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+        
+        // --- 1. 配置参数 (根据设备性能自动调整) ---
+        const CONFIG = {
+            particleCount: isMobile ? 1800 : 3500, // 手机端减少粒子以防过热
+            particleSize: isMobile ? 0.25 : 0.15,  // 手机端粒子稍大，看起来更饱满
+            baseColor: 0x0a84ff,
+            camZ: isMobile ? 18 : 12 // 手机竖屏时，相机拉远一点，防止图形溢出
+        };
+
+        let scene, camera, renderer, particles, geometry, material;
+        let targetPositions = [];
+        let interactionFactor = 0; 
+        
+        // --- 2. 形状生成器 ---
+        const ShapeGenerator = {
+            getFromCanvas: (text, fontSize = 100) => {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = 400; // 降低分辨率以提高性能
+                canvas.height = 150;
+                ctx.fillStyle = '#000';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = '#fff';
+                ctx.font = `bold ${fontSize}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+
+                const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                const points = [];
+                const step = 4; 
+                
+                for (let y = 0; y < canvas.height; y += step) {
+                    for (let x = 0; x < canvas.width; x += step) {
+                        if (data[(y * canvas.width + x) * 4] > 128) {
+                            points.push({
+                                x: (x - canvas.width / 2) * 0.06,
+                                y: -(y - canvas.height / 2) * 0.06,
+                                z: 0
+                            });
+                        }
+                    }
+                }
+                return points;
+            },
+
+            generate: (type) => {
+                const points = [];
+                const count = CONFIG.particleCount;
+
+                if (type === 'roger' || type === 'thumbsup') {
+                    const text = type === 'roger' ? 'Roger' : '👍';
+                    const rawPoints = ShapeGenerator.getFromCanvas(text, type === 'roger' ? 100 : 80);
+                    // 随机采样填充
+                    for (let i = 0; i < count; i++) {
+                        const p = rawPoints[i % rawPoints.length];
+                        // 加一点点随机厚度 z
+                        points.push(p.x, p.y, p.z + (Math.random()-0.5)*1.5);
+                    }
+                } else {
+                    for (let i = 0; i < count; i++) {
+                        let x, y, z;
+                        const t = Math.random() * Math.PI * 2;
+                        
+                        if (type === 'heart') {
+                            const phi = Math.random() * Math.PI * 2;
+                            // 心形公式
+                            x = 16 * Math.pow(Math.sin(phi), 3);
+                            y = 13 * Math.cos(phi) - 5 * Math.cos(2 * phi) - 2 * Math.cos(3 * phi) - Math.cos(4 * phi);
+                            z = (Math.random() - 0.5) * 4; 
+                            // 整体缩放
+                            x *= 0.35; y *= 0.35; z *= 0.35;
+                            y += 1; // 稍微上移
+                        } 
+                        else if (type === 'saturn') {
+                            if (i < count * 0.35) { // 本体
+                                const r = 2.5;
+                                const theta = Math.random() * Math.PI * 2;
+                                const phi = Math.acos(Math.random() * 2 - 1);
+                                x = r * Math.sin(phi) * Math.cos(theta);
+                                y = r * Math.sin(phi) * Math.sin(theta);
+                                z = r * Math.cos(phi);
+                            } else { // 环
+                                const r = Math.sqrt(Math.random() * (36 - 12) + 12); // r between sqrt(12) and 6
+                                const theta = Math.random() * Math.PI * 2;
+                                x = r * Math.cos(theta);
+                                z = r * Math.sin(theta);
+                                y = (Math.random() - 0.5) * 0.1;
+                                // 旋转环
+                                const tilt = 0.5;
+                                const ty = y * Math.cos(tilt) - z * Math.sin(tilt);
+                                const tz = y * Math.sin(tilt) + z * Math.cos(tilt);
+                                y = ty; z = tz;
+                            }
+                        }
+                        points.push(x, y, z);
+                    }
+                }
+                return points;
+            }
+        };
+
+        // --- 3. Three.js 初始化 ---
+        function initThree() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x050505, 0.03);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.z = CONFIG.camZ;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            // 材质
+            const sprite = new THREE.TextureLoader().load('https://threejs.org/examples/textures/sprites/disc.png');
+            material = new THREE.PointsMaterial({
+                size: CONFIG.particleSize,
+                map: sprite,
+                color: CONFIG.baseColor,
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            // 初始化粒子
+            geometry = new THREE.BufferGeometry();
+            const initialPos = ShapeGenerator.generate('heart');
+            targetPositions = [...initialPos];
+            
+            // 初始随机位置（爆炸状态）
+            const currentPos = [];
+            for(let i=0; i<initialPos.length; i++) currentPos.push((Math.random()-0.5)*30);
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(currentPos, 3));
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+            
+            animate();
+        }
+
+        // --- 4. 动画循环 ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const positions = particles.geometry.attributes.position.array;
+            
+            // 交互参数：手张开越大，粒子越扩散，且整体变大
+            const scale = 1 + interactionFactor * 1.5; 
+            const spread = interactionFactor * 2.0;
+            const lerpSpeed = 0.06; // 稍微平滑一点
+
+            for (let i = 0; i < positions.length; i += 3) {
+                let tx = targetPositions[i] * scale;
+                let ty = targetPositions[i+1] * scale;
+                let tz = targetPositions[i+2] * scale;
+
+                // 扩散抖动
+                if (interactionFactor > 0.05) {
+                    tx += (Math.random() - 0.5) * spread;
+                    ty += (Math.random() - 0.5) * spread;
+                    tz += (Math.random() - 0.5) * spread;
+                }
+
+                positions[i] += (tx - positions[i]) * lerpSpeed;
+                positions[i+1] += (ty - positions[i+1]) * lerpSpeed;
+                positions[i+2] += (tz - positions[i+2]) * lerpSpeed;
+            }
+            
+            particles.geometry.attributes.position.needsUpdate = true;
+            particles.rotation.y += 0.003; // 自转
+            
+            renderer.render(scene, camera);
+        }
+
+        function switchShape(shapeName) {
+            targetPositions = ShapeGenerator.generate(shapeName);
+        }
+
+        // --- 5. MediaPipe Hands 逻辑 ---
+        const videoElement = document.getElementsByClassName('input_video')[0];
+        const statusText = document.getElementById('status-text');
+        const statusDot = document.getElementById('status-dot');
+
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                statusText.innerText = "已连接：手势控制中";
+                statusDot.style.background = "#30d158"; // iOS Green
+
+                let dist = 0;
+                // 计算距离逻辑
+                if (results.multiHandLandmarks.length === 2) {
+                    // 双手：计算两个食指指尖距离
+                    const h1 = results.multiHandLandmarks[0][8];
+                    const h2 = results.multiHandLandmarks[1][8];
+                    const d = Math.sqrt(Math.pow(h1.x - h2.x, 2) + Math.pow(h1.y - h2.y, 2));
+                    // 映射：距离0.1->0, 距离0.5->1
+                    dist = Math.min(Math.max((d - 0.1) * 2.5, 0), 1);
+                } else {
+                    // 单手：拇指与食指距离
+                    const h = results.multiHandLandmarks[0];
+                    const d = Math.sqrt(Math.pow(h[4].x - h[8].x, 2) + Math.pow(h[4].y - h[8].y, 2));
+                    dist = Math.min(Math.max((d - 0.03) * 5, 0), 1);
+                }
+                
+                interactionFactor += (dist - interactionFactor) * 0.15;
+            } else {
+                statusText.innerText = "等待手势...";
+                statusDot.style.background = "#ff9f0a"; // iOS Orange
+                interactionFactor += (0 - interactionFactor) * 0.05;
+            }
+        }
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 0, // 0 = Lite (更快), 1 = Full (更准)
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        // 使用 CameraUtils 启动，添加错误处理
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+
+        cameraUtils.start()
+            .then(() => { console.log("Camera started"); })
+            .catch(err => {
+                statusText.innerText = "摄像头启动失败，请检查权限";
+                statusDot.style.background = "#ff3b30";
+                alert("无法访问摄像头。请在设置中允许 Safari 访问摄像头，并确保使用 HTTPS 或 CodePen。");
+            });
+
+        // --- 6. 事件绑定 ---
+        initThree();
+
+        // 按钮点击
+        document.querySelectorAll('.shape-btn').forEach(btn => {
+            // 支持 touchstart 消除移动端点击延迟
+            btn.addEventListener('touchstart', (e) => { e.preventDefault(); btn.click(); });
+            btn.addEventListener('click', (e) => {
+                const target = e.target.closest('.shape-btn'); // 防止点到图标
+                if(target.id === 'fs-btn') return;
+                
+                document.querySelectorAll('.shape-btn').forEach(b => b.classList.remove('active'));
+                target.classList.add('active');
+                switchShape(target.dataset.shape);
+            });
+        });
+
+        // 颜色
+        document.getElementById('colorPicker').addEventListener('input', (e) => {
+            particles.material.color.set(e.target.value);
+        });
+
+        // 全屏 (iOS Safari 限制较大，可能无效，但留着)
+        document.getElementById('fs-btn').addEventListener('click', () => {
+             // 尝试隐藏地址栏的一个小 trick
+            window.scrollTo(0, 1);
+            if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+                document.documentElement.requestFullscreen().catch(() => {});
+            }
+        });
+
+    </script>
+</body>
+</html>
